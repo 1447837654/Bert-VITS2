@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.amp import GradScaler
 from tqdm import tqdm
 import logging
 from config import config
@@ -346,7 +347,7 @@ def run():
         )
     else:
         scheduler_dur_disc = None
-    scaler = GradScaler(enabled=hps.train.bf16_run)
+    scaler = GradScaler('cuda', enabled=hps.train.bf16_run)
 
     wl = WavLMLoss(
         hps.model.slm.model,
@@ -455,7 +456,7 @@ def train_and_evaluate(
         ja_bert = ja_bert.cuda(local_rank, non_blocking=True)
         en_bert = en_bert.cuda(local_rank, non_blocking=True)
 
-        with autocast(enabled=hps.train.bf16_run, dtype=torch.bfloat16):
+        with autocast('cuda', enabled=hps.train.bf16_run, dtype=torch.bfloat16):
             (
                 y_hat,
                 l_length,
@@ -506,7 +507,7 @@ def train_and_evaluate(
 
             # Discriminator
             y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
-            with autocast(enabled=hps.train.bf16_run, dtype=torch.bfloat16):
+            with autocast('cuda', enabled=hps.train.bf16_run, dtype=torch.bfloat16):
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(
                     y_d_hat_r, y_d_hat_g
                 )
@@ -528,7 +529,7 @@ def train_and_evaluate(
                 )
                 y_dur_hat_r = y_dur_hat_r + y_dur_hat_r_sdp
                 y_dur_hat_g = y_dur_hat_g + y_dur_hat_g_sdp
-                with autocast(enabled=hps.train.bf16_run, dtype=torch.bfloat16):
+                with autocast('cuda', enabled=hps.train.bf16_run, dtype=torch.bfloat16):
                     # TODO: I think need to mean using the mask, but for now, just mean all
                     (
                         loss_dur_disc,
@@ -537,7 +538,11 @@ def train_and_evaluate(
                     ) = discriminator_loss(y_dur_hat_r, y_dur_hat_g)
                     loss_dur_disc_all = loss_dur_disc
                 optim_dur_disc.zero_grad()
-                scaler.scale(loss_dur_disc_all).backward()
+                if torch.isnan(loss_dur_disc_all) or torch.isinf(loss_dur_disc_all):
+                    print("Loss is NaN or Inf!")
+
+                tempobj = scaler.scale(loss_dur_disc_all)
+                tempobj.backward()
                 scaler.unscale_(optim_dur_disc)
                 # torch.nn.utils.clip_grad_norm_(
                 #     parameters=net_dur_disc.parameters(), max_norm=100
@@ -555,7 +560,7 @@ def train_and_evaluate(
         grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None)
         scaler.step(optim_d)
 
-        with autocast(enabled=hps.train.bf16_run, dtype=torch.bfloat16):
+        with autocast('cuda', enabled=hps.train.bf16_run, dtype=torch.bfloat16):
             loss_slm = wl.discriminator(
                 y.detach().squeeze(), y_hat.detach().squeeze()
             ).mean()
@@ -567,14 +572,14 @@ def train_and_evaluate(
         grad_norm_wd = commons.clip_grad_value_(net_wd.parameters(), None)
         scaler.step(optim_wd)
 
-        with autocast(enabled=hps.train.bf16_run, dtype=torch.bfloat16):
+        with autocast('cuda', enabled=hps.train.bf16_run, dtype=torch.bfloat16):
             # Generator
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
             if net_dur_disc is not None:
                 _, y_dur_hat_g = net_dur_disc(hidden_x, x_mask, logw_, logw, g)
                 _, y_dur_hat_g_sdp = net_dur_disc(hidden_x, x_mask, logw_, logw_sdp, g)
                 y_dur_hat_g = y_dur_hat_g + y_dur_hat_g_sdp
-            with autocast(enabled=hps.train.bf16_run, dtype=torch.bfloat16):
+            with autocast('cuda', enabled=hps.train.bf16_run, dtype=torch.bfloat16):
                 loss_dur = torch.sum(l_length.float())
                 loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
