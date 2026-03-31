@@ -30,7 +30,7 @@ def get_bert_feature(
     if device not in models.keys():
         models[device] = DebertaV2Model.from_pretrained(LOCAL_PATH).to(device)
     with torch.no_grad():
-        inputs = tokenizer(text, return_tensors="pt")
+        inputs = tokenizer(text, return_tensors="pt", padding='max_length', max_length=len(word2ph), truncation=True, add_special_tokens=True)
         for i in inputs:
             inputs[i] = inputs[i].to(device)
         res = models[device](**inputs, output_hidden_states=True)
